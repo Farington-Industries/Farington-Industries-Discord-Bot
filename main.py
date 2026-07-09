@@ -1,18 +1,70 @@
 import os
+import json
 import datetime
+import random
 import requests
 import asyncio
+import time
+import threading
 import discord
 from discord.ext import commands
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 ROBLOX_GROUP = os.getenv("ROBLOX_GROUP")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
+SEEN_UGC_FILE = os.path.join(os.path.dirname(__file__), "seen_ugc_names.json")
+NEW_UGC_MSGS_FILE = os.path.join(os.path.dirname(__file__), "new_ugc_msgs.json")
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix='=', intents=intents)
+
+def normalize_name(name):
+    return str(name).strip().lower()
+
+
+def load_seen_ugc_names():
+    if not os.path.exists(SEEN_UGC_FILE):
+        return {}
+
+    try:
+        with open(SEEN_UGC_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
+            if isinstance(data, list):
+                return {
+                    normalize_name(name): str(name).strip()
+                    for name in data
+                    if str(name).strip()
+                }
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+    return {}
+
+
+def save_seen_ugc_names(seen_names):
+    with open(SEEN_UGC_FILE, "w", encoding="utf-8") as file:
+        json.dump(list(seen_names.values()), file, indent=2)
+
+
+def get_random_ugc_message(file_path=NEW_UGC_MSGS_FILE):
+    if not os.path.exists(file_path):
+        return None
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            messages = json.load(file)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+    if isinstance(messages, list) and messages:
+        return random.choice(messages)
+
+    return None
+
+
 def get_msg_info(message):
     server = message.guild
     channel = message.channel
@@ -36,39 +88,128 @@ async def fetch_roblox_items():
     return response.json()
 
 
-def format_item_message(item):
-    name = item.get("name", "Unnamed item")
+async def fetch_roblox_thumbs(assetID):
+    url = f"https://thumbnails.roblox.com/v1/assets?assetIds={assetID}&returnPolicy=PlaceHolder&size=700x700&format=Png&isCircular=false"
+    headers = {"accept": "application/json"}
+
+    response = await asyncio.to_thread(requests.get, url, headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+
+def format_item_description(item):
     description = item.get("description", "No description provided.")
     description = " ".join(description.split())
-    if len(description) > 500:
-        description = description[:497] + "..."
-    return f"**{name}**\n{description}"
+    if len(description) > 200:
+        description = description[:197] + "..."
+    return description
 
-@bot.event
-async def on_ready():
-    print(f'Logged in as {bot.user}')
+## new
+async def build_release_embeds(items):
+    store_url = "https://www.roblox.com/communities/513244608/Farington-Industries#!/store"
+    embed = discord.Embed(
+        color=5814783,
+        url=store_url,
+        title="UGC RELEASES",
+        description="New UGC releases from Farington Industries",
+    )
+    
+    img_embeds = []
 
-@bot.command()
-async def ping(ctx):
-    await ctx.send('Pong!')
+    for item in items:
+        name = item.get("name", "Unnamed item")
+        description = format_item_description(item)
+        asset_id = item.get("id") or item.get("assetId") or item.get("asset_id")
+        image_url = ""
 
-@bot.command()
-async def roblox(ctx):
+        if asset_id:
+            try:
+                thumbnail_response = await fetch_roblox_thumbs(asset_id)
+                thumb_data = thumbnail_response.get("data", [])
+                if thumb_data:
+                    image_url = thumb_data[0].get("imageUrl", "")
+            except Exception as e:
+                print(f"Failed to fetch thumbnail for asset ID {asset_id}: {e}")
+
+        embed.add_field(name=name, value=description, inline=False)
+        if image_url and len(items) < 5:
+            img = discord.Embed(
+                url=store_url,
+            ).set_image(url=image_url)
+            img_embeds.append(img)
+
+    return [embed] + img_embeds
+
+async def check_ugc():
     try:
         items = await fetch_roblox_items()
         data = items.get("data", [])
 
         if not data:
-            await ctx.send("No Roblox items found.")
             return
 
+        seen_names = load_seen_ugc_names()
+        new_items = []
+        seen_in_this_run = set()
+
         for item in data:
-            await ctx.send(format_item_message(item))
+            name = item.get("name", "Unnamed item")
+            normalized_name = normalize_name(name)
+            if normalized_name in seen_names or normalized_name in seen_in_this_run:
+                continue
+
+            new_items.append(item)
+            seen_in_this_run.add(normalized_name)
+
+        if not new_items:
+            return
+        
+        random_msg = get_random_ugc_message()
+        embeds = await build_release_embeds(new_items)
+
+        # Send to configured channel ID instead of using ctx
+        try:
+            content = f"{random_msg}" if random_msg else ""
+            if CHANNEL_ID:
+                try:
+                    cid = int(CHANNEL_ID)
+                    channel = bot.get_channel(cid)
+                    if channel is None:
+                        channel = await bot.fetch_channel(cid)
+                    await channel.send(content, embeds=embeds)
+                except Exception as e:
+                    print(f"Failed to send to channel {CHANNEL_ID}: {e}")
+            else:
+                print("CHANNEL_ID not set; skipping send.")
+        except Exception as e:
+            print(f"Failed to send message: {e}")
+
+        for item in new_items:
+            name = item.get("name", "Unnamed item")
+            seen_names[normalize_name(name)] = str(name).strip()
+
+        save_seen_ugc_names(seen_names)
     except Exception as e:
-        await ctx.send(f"Failed to fetch Roblox items: {e}")
+        print(f"Failed to fetch Roblox items: {e}")
+
+threading.Timer(1800, lambda: asyncio.run(check_ugc)).start()  # Check every 30 minutes
+
+@bot.event
+async def on_ready():
+    print(f'Logged in as {bot.user}')
+    await check_ugc()  # Check for UGC releases when the bot starts
+
+@bot.command()
+async def ping(ctx):
+    await ctx.send('Pong!')
 
 if __name__ == "__main__":
     if DISCORD_TOKEN:
         bot.run(DISCORD_TOKEN)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("Bot stopped by user.")
     else:
         print("Fatal error: DISCORD_TOKEN environment variable is not configured.")
