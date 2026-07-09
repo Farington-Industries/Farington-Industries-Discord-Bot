@@ -231,7 +231,7 @@ async def bot_status_update():
             )
 
 threading.Timer(1800, lambda: asyncio.run(check_ugc)).start()  # Check every 30 minutes
-threading.Timer(60, lambda: asyncio.run(bot_status_update)).start()  # Check every 30 minutes
+threading.Timer(60, lambda: asyncio.run(bot_status_update)).start()  # Check every minute
 
 @bot.event
 async def on_ready():
