@@ -6,6 +6,7 @@ import requests
 import asyncio
 import time
 import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import discord
 from discord.ext import commands
 
@@ -20,6 +21,33 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix='=', intents=intents)
+
+
+class WebsiteHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/", "/health"):
+            response = "<html><body><h1>Farington Industries</h1><p>The bot service is running.</p></body></html>".encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_web_server():
+    port = int(os.getenv("PORT", "4000"))
+    server = HTTPServer(("0.0.0.0", port), WebsiteHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"Web server started on port {port}")
+    return server
+
 
 def normalize_name(name):
     return str(name).strip().lower()
@@ -204,6 +232,8 @@ async def ping(ctx):
     await ctx.send('Pong!')
 
 if __name__ == "__main__":
+    start_web_server()
+
     if DISCORD_TOKEN:
         bot.run(DISCORD_TOKEN)
         try:
@@ -212,4 +242,9 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             print("Bot stopped by user.")
     else:
-        print("Fatal error: DISCORD_TOKEN environment variable is not configured.")
+        print("DISCORD_TOKEN not set; web server is running without the bot.")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("Server stopped by user.")
