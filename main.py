@@ -220,11 +220,22 @@ async def check_ugc():
     except Exception as e:
         print(f"Failed to fetch Roblox items: {e}")
 
+old_status = ""
+BOT_STATUS = os.getenv("BOT_STATUS", "🐾")
+async def bot_status_update():
+    if DISCORD_TOKEN and bot.is_ready() and BOT_STATUS:
+        if BOT_STATUS != old_status:
+            await bot.change_presence(
+                activity=discord.Game(name=BOT_STATUS),
+                status=discord.Status.online,
+            )
+
 threading.Timer(1800, lambda: asyncio.run(check_ugc)).start()  # Check every 30 minutes
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
+    await bot_status_update()
     await check_ugc()  # Check for UGC releases when the bot starts
 
 @bot.command()
