@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: farington-discord-bot
+    env: python
+    plan: free
+    healthCheckPath: /health
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: DISCORD_TOKEN
+        scope: run
+      - key: ROBLOX_GROUP
+        scope: run
+      - key: CHANNEL_ID
+        scope: run

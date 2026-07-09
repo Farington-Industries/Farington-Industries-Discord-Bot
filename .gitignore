@@ -182,6 +182,3 @@ cython_debug/
 
 # VSCode
 .vscode/
-
-# Render
-render.yaml
