@@ -37,12 +37,38 @@ class WebsiteHandler(BaseHTTPRequestHandler):
         if path in ("/", "/health"):
             current_status = get_current_status()
             current_status_html = html.escape(current_status)
+            
+            seen_items_dict = load_seen_ugc_names()
+            seen_items_list = list(seen_items_dict.values())
+            
+            if seen_items_list:
+                items_html = "".join(f"<li>{html.escape(item)}</li>" for item in seen_items_list)
+                seen_section_html = f"<h3>Logged UGC Items ({len(seen_items_list)}):</h3><ul>{items_html}</ul>"
+            else:
+                seen_section_html = "<h3>Logged UGC Items:</h3><p>No items seen yet! 🐾</p>"
+            
             response_html = f"""
             <html>
+              
+              <head>
+                <title>Kara Control Panel</title>
+                
+                <style>
+                  body {{ font-family: sans-serif; margin: 20px; line-height: 1.5; }}
+                  form {{ background: #f4f4f9; padding: 15px; border-radius: 5px; max-width: 400px; }}
+                  ul {{ max-height: 200px; overflow-y: auto; background: #fafafa; padding: 15px 30px; border: 1px solid #ddd; border-radius: 5px; }}
+                </style>
+                
+              </head>
+              
               <body>
+              
                 <h1>Farington Industries</h1>
+                
                 <p>The bot service is running.</p>
+                
                 <p><strong>Current status:</strong> {current_status_html}</p>
+                
                 <form action="/status" method="post">
                   <label for="status">Status</label><br>
                   <input type="text" id="status" name="status" value="{current_status_html}" maxlength="100" required><br><br>
@@ -50,6 +76,10 @@ class WebsiteHandler(BaseHTTPRequestHandler):
                   <input type="password" id="password" name="password" maxlength="100"><br><br>
                   <button type="submit">Update status</button>
                 </form>
+                
+                <hr>
+                {seen_section_html}
+                
               </body>
             </html>
             """
