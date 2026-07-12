@@ -69,12 +69,24 @@ class WebsiteHandler(BaseHTTPRequestHandler):
                 
                 <p><strong>Current status:</strong> {current_status_html}</p>
                 
+                <h3>Update Bot Status</h3>
                 <form action="/status" method="post">
                   <label for="status">Status</label><br>
                   <input type="text" id="status" name="status" value="{current_status_html}" maxlength="100" required><br><br>
                   <label for="password">Password</label><br>
                   <input type="password" id="password" name="password" maxlength="100"><br><br>
                   <button type="submit">Update status</button>
+                </form>
+
+                <h3>Send Message to Channel</h3>
+                <form action="/send_message" method="post">
+                  <label for="channel_id">Channel ID</label><br>
+                  <input type="text" id="channel_id" name="channel_id" placeholder="e.g., 123456789012345678" required><br><br>
+                  <label for="message">Message</label><br>
+                  <textarea id="message" name="message" rows="4" style="width: 100%; max-width: 100%; box-sizing: border-box;" placeholder="Type your message here..." required></textarea><br><br>
+                  <label for="msg_password">Password</label><br>
+                  <input type="password" id="msg_password" name="password" maxlength="100"><br><br>
+                  <button type="submit">Send Message</button>
                 </form>
                 
                 <hr>
@@ -89,28 +101,70 @@ class WebsiteHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
-        if path != "/status":
+        if path == "/status":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8") if length else ""
+            fields = parse_qs(body, keep_blank_values=True)
+            status_value = fields.get("status", [""])[0].strip()
+            password_value = fields.get("password", [""])[0].strip()
+
+            if not is_status_update_authorized(password_value):
+                self._send_html(403, "<h1>Forbidden</h1><p>Incorrect password.</p>")
+                return
+
+            if not status_value:
+                self._send_html(400, "<h1>Bad Request</h1><p>Status cannot be empty.</p>")
+                return
+
+            save_status_value(status_value)
+            self._send_html(
+                200, f"<h1>Status updated</h1><p>New status: {html.escape(status_value)}</p><a href=\"/\">Back</a>"
+            )
+        elif path == "/send_message":
+            length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(length).decode("utf-8") if length else ""
+            fields = parse_qs(body, keep_blank_values=True)
+            channel_id_value = fields.get("channel_id", [""])[0].strip()
+            message_value = fields.get("message", [""])[0].strip()
+            password_value = fields.get("password", [""])[0].strip()
+
+            if not is_status_update_authorized(password_value):
+                self._send_html(403, "<h1>Forbidden</h1><p>Incorrect password.</p>")
+                return
+
+            if not channel_id_value or not message_value:
+                self._send_html(400, "<h1>Bad Request</h1><p>Channel ID and Message cannot be empty.</p>")
+                return
+
+            # Try parsing message_value as JSON to see if it's our custom embed format
+            embed_data = None
+            content_text = message_value
+            
+            if message_value.startswith("{") and message_value.endswith("}"):
+                try:
+                    parsed_json = json.loads(message_value)
+                    # Support parsing if it contains the "data" wrapper or directly at root
+                    payload = parsed_json.get("data", parsed_json) if isinstance(parsed_json, dict) else parsed_json
+                    
+                    if isinstance(payload, dict) and "embeds" in payload:
+                        embed_data = payload.get("embeds", [])
+                        content_text = payload.get("content", "")
+                except json.JSONDecodeError:
+                    pass # Not valid JSON, treat it as a normal plain-text message string!
+
+            # Execute the discord async logic safely from the HTTP thread
+            success, err = send_discord_message_sync(channel_id_value, content_text, embed_data)
+            
+            if success:
+                self._send_html(
+                    200, f"<h1>Message Sent!</h1><p>Successfully dispatched payload to channel {html.escape(channel_id_value)}.</p><a href=\"/\">Back</a>"
+                )
+            else:
+                self._send_html(
+                    500, f"<h1>Internal Server Error</h1><p>Failed to send message: {html.escape(err)}</p><a href=\"/\">Back</a>"
+                )
+        else:
             self._send_html(404, "<h1>Not Found</h1>")
-            return
-
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length).decode("utf-8") if length else ""
-        fields = parse_qs(body, keep_blank_values=True)
-        status_value = fields.get("status", [""])[0].strip()
-        password_value = fields.get("password", [""])[0].strip()
-
-        if not is_status_update_authorized(password_value):
-            self._send_html(403, "<h1>Forbidden</h1><p>Incorrect password.</p>")
-            return
-
-        if not status_value:
-            self._send_html(400, "<h1>Bad Request</h1><p>Status cannot be empty.</p>")
-            return
-
-        save_status_value(status_value)
-        self._send_html(
-            200, f"<h1>Status updated</h1><p>New status: {html.escape(status_value)}</p><a href=\"/\">Back</a>"
-        )
     
     def do_HEAD(self):
         path = self.path.split("?", 1)[0]
@@ -215,6 +269,87 @@ def is_status_update_authorized(password_value):
         return password_value == STATUS_UPDATE_PASSWORD
     print("Warning: STATUS_UPDATE_PASSWORD environment variable is not set!")
     return False
+
+
+async def async_send_message(channel_id_str, text_message, embed_data_list=None):
+    """Internal helper targeting Discord event loop from server requests."""
+    if not bot.is_ready():
+        return False, "Bot is not ready or logged in yet."
+    try:
+        cid = int(channel_id_str)
+        channel = bot.get_channel(cid) or await bot.fetch_channel(cid)
+        
+        discord_embeds = []
+        if embed_data_list:
+            for emb in embed_data_list:
+                title = emb.get("title")
+                description = emb.get("description")
+                color = emb.get("color")
+                
+                # Setup base embed parameters safely
+                kwargs = {}
+                if title: kwargs["title"] = title
+                if description: kwargs["description"] = description
+                if isinstance(color, int): kwargs["color"] = color
+                
+                e = discord.Embed(**kwargs)
+                
+                # Author sub-object parsing
+                author = emb.get("author")
+                if isinstance(author, dict) and author.get("name"):
+                    e.set_author(
+                        name=author.get("name"),
+                        icon_url=author.get("icon_url") or None
+                    )
+                
+                # Image sub-object parsing
+                image = emb.get("image")
+                if isinstance(image, dict) and image.get("url"):
+                    e.set_image(url=image.get("url"))
+                    
+                # Footer sub-object parsing
+                footer = emb.get("footer")
+                if isinstance(footer, dict) and footer.get("text"):
+                    e.set_footer(text=footer.get("text"))
+                    
+                # Fields array parsing
+                fields = emb.get("fields", [])
+                for field in fields:
+                    if isinstance(field, dict):
+                        e.add_field(
+                            name=field.get("name", "Field"),
+                            value=field.get("value", "Value"),
+                            inline=field.get("inline", False)
+                        )
+                
+                discord_embeds.append(e)
+
+        # Build payload conditionally
+        send_kwargs = {}
+        if text_message:
+            send_kwargs["content"] = text_message
+        if discord_embeds:
+            send_kwargs["embeds"] = discord_embeds
+
+        if not send_kwargs:
+            return False, "Cannot send an empty message."
+
+        await channel.send(**send_kwargs)
+        return True, None
+    except ValueError:
+        return False, "Invalid Channel ID format (Must be an integer)."
+    except Exception as e:
+        return False, str(e)
+
+
+def send_discord_message_sync(channel_id_str, text_message, embed_data_list=None):
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            async_send_message(channel_id_str, text_message, embed_data_list), bot.loop
+        )
+        return future.result()
+    except Exception as e:
+        return False, str(e)
 
 
 async def fetch_roblox_items():
