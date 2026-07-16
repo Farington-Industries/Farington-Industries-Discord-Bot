@@ -435,7 +435,7 @@ async def check_ugc_loop():
         random_msg = get_random_ugc_message()
         embeds = await build_release_embeds(new_items)
 
-        content = f"{random_msg}" if random_msg else ""
+        content = f"<@&1525694598603735142> {random_msg}" if random_msg else ""
         if CHANNEL_ID:
             try:
                 cid = int(CHANNEL_ID)
